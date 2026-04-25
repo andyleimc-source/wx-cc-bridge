@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,9 @@ from pathlib import Path
 from . import claude_runner, commands
 from .ilink.client import ILinkClient, extract_meta, extract_text, login
 from .session_store import SessionStore
+
+TYPING_HEARTBEAT_SEC = 3.0
+SOFT_NOTICE_SEC = 90.0  # 超过此时长仍未返回，停 typing 并发一条"还在思考"提示
 
 STATE_DIR = Path(os.environ.get("WX_CC_STATE", Path.home() / ".wx-cc-bridge"))
 TOKEN_PATH = STATE_DIR / "token.json"
@@ -35,6 +39,64 @@ def _load_cursor() -> str:
 def _save_cursor(c: str) -> None:
     CURSOR_PATH.parent.mkdir(parents=True, exist_ok=True)
     CURSOR_PATH.write_text(c)
+
+
+@contextlib.asynccontextmanager
+async def typing_indicator(
+    client: ILinkClient,
+    chat_id: str,
+    ctx_token: str,
+    max_duration: float | None = None,
+):
+    """Show "正在输入" in WeChat while the body executes.
+
+    Best-effort: any typing API failure is logged and ignored so it can't
+    block the real reply flow. Server auto-cancels typing after 60s; we
+    re-send every 3s to keep the indicator alive, matching the official SDK.
+
+    If ``max_duration`` is set, heartbeat自动停（用户会看到 typing 消失），
+    但不影响正在执行的 body。
+    """
+    try:
+        ticket = await client.get_typing_ticket(chat_id, ctx_token)
+    except Exception as e:
+        print(f"[typing] get_config error: {e!r}")
+        ticket = None
+
+    if not ticket:
+        yield
+        return
+
+    stop = asyncio.Event()
+
+    async def loop() -> None:
+        elapsed = 0.0
+        while not stop.is_set():
+            if max_duration is not None and elapsed >= max_duration:
+                print(f"[typing] soft cutoff hit ({max_duration}s), stop heartbeat")
+                return
+            try:
+                await client.send_typing(chat_id, ticket, status=1)
+            except Exception as e:
+                print(f"[typing] keepalive error: {e!r}")
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=TYPING_HEARTBEAT_SEC)
+                return
+            except asyncio.TimeoutError:
+                elapsed += TYPING_HEARTBEAT_SEC
+                continue
+
+    task = asyncio.create_task(loop())
+    try:
+        yield
+    finally:
+        stop.set()
+        with contextlib.suppress(Exception):
+            await task
+        try:
+            await client.send_typing(chat_id, ticket, status=2)
+        except Exception as e:
+            print(f"[typing] cancel error: {e!r}")
 
 
 async def handle_message(
@@ -61,7 +123,30 @@ async def handle_message(
 
         print(f"[claude→] {chat_id} cwd={cwd} sid={session_id}")
         t0 = asyncio.get_event_loop().time()
-        result = await claude_runner.ask(text, cwd=cwd, session_id=session_id)
+
+        async def _soft_notice() -> None:
+            try:
+                await asyncio.sleep(SOFT_NOTICE_SEC)
+                await client.send_text(
+                    chat_id, ctx_token, "(还在思考中，请稍等…)"
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f"[soft-notice] error: {e!r}")
+
+        notice_task = asyncio.create_task(_soft_notice())
+        try:
+            async with typing_indicator(
+                client, chat_id, ctx_token, max_duration=SOFT_NOTICE_SEC
+            ):
+                result = await claude_runner.ask(
+                    text, cwd=cwd, session_id=session_id
+                )
+        finally:
+            notice_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await notice_task
         dt = asyncio.get_event_loop().time() - t0
         print(
             f"[claude←] {dt:.1f}s "

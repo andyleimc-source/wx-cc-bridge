@@ -23,7 +23,7 @@ async def ask(
     prompt: str,
     cwd: Path,
     session_id: str | None = None,
-    timeout: float = 300.0,
+    timeout: float = 600.0,
 ) -> ClaudeResult:
     """Invoke `claude -p` in the given cwd, optionally resuming a session.
 
