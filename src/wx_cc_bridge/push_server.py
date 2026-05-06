@@ -145,7 +145,24 @@ def make_handler(
                 return
 
             print(f"[push→] {chat_id} ({len(text)} chars) resp={resp}")
-            writer.write(_resp(200, {"ok": True}))
+            # iLink server returns ret=0 on real delivery; ret=-2 means the
+            # cached context_token has gone stale (user hasn't pinged the bot
+            # recently) and the message was silently dropped. Surface that
+            # to the caller as 502 so retries / queueing can happen upstream.
+            ret = resp.get("ret") if isinstance(resp, dict) else None
+            if ret not in (0, None):
+                writer.write(
+                    _resp(
+                        502,
+                        {
+                            "error": "ilink rejected delivery",
+                            "ret": ret,
+                            "hint": "context_token likely stale; user must ping bot to refresh",
+                        },
+                    )
+                )
+            else:
+                writer.write(_resp(200, {"ok": True}))
             await writer.drain()
         finally:
             try:
