@@ -11,7 +11,7 @@ import json
 import os
 from pathlib import Path
 
-from . import claude_runner, commands
+from . import claude_runner, commands, push_server
 from .ilink.client import ILinkClient, extract_meta, extract_text, login
 from .session_store import SessionStore
 
@@ -178,6 +178,17 @@ async def main() -> None:
     cursor = _load_cursor()
     print(f"[bridge] start, cursor={cursor!r}, ws_root={DEFAULT_WS_ROOT}")
 
+    push_token = os.environ.get("WX_BRIDGE_PUSH_TOKEN")
+    push_srv: object | None = None
+    if push_token:
+        push_host = os.environ.get("WX_BRIDGE_PUSH_HOST", "127.0.0.1")
+        push_port = int(os.environ.get("WX_BRIDGE_PUSH_PORT", "8787"))
+        push_srv = await push_server.serve(
+            client, store, push_token, host=push_host, port=push_port
+        )
+    else:
+        print("[push] WX_BRIDGE_PUSH_TOKEN not set, push endpoint disabled")
+
     while True:
         try:
             data = await client.getupdates(cursor)
@@ -203,6 +214,7 @@ async def main() -> None:
                 print(f"[msg] skipped: {json.dumps(msg, ensure_ascii=False)[:400]}")
                 continue
             print(f"[msg] {sender}: {text[:120]}")
+            store.set_ctx_token(sender, ctx_token)
             # dispatch without blocking the poll loop; per-chat lock serializes
             asyncio.create_task(
                 handle_message(sender, ctx_token, text, client, store, locks)

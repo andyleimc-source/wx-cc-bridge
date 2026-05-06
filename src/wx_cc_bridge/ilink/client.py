@@ -9,6 +9,7 @@ import base64
 import json
 import os
 import struct
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,10 @@ import httpx
 BASE_URL_DEFAULT = "https://ilinkai.weixin.qq.com"
 CHANNEL_VERSION = "1.0.2"
 LONGPOLL_TIMEOUT = 40.0  # server holds 35s, give HTTP a bit more
+CONFIG_TIMEOUT = 10.0
+# Refresh typing_ticket well within the server's 24h TTL; a few hours is plenty
+# and matches the official SDK's "random within 24h" behavior.
+TYPING_TICKET_TTL = 6 * 3600
 
 
 def _uin_header() -> str:
@@ -35,6 +40,8 @@ class ILinkClient:
         self.bot_token = bot_token
         self.base_url = base_url.rstrip("/")
         self._client = httpx.AsyncClient(timeout=LONGPOLL_TIMEOUT)
+        # Per-user typing_ticket cache: {ilink_user_id: (ticket, fetched_at_monotonic)}
+        self._typing_tickets: dict[str, tuple[str, float]] = {}
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -77,6 +84,57 @@ class ILinkClient:
                 "base_info": {"channel_version": CHANNEL_VERSION},
             },
         )
+
+    async def get_config(
+        self, ilink_user_id: str, context_token: str | None = None
+    ) -> dict:
+        body: dict[str, Any] = {
+            "ilink_user_id": ilink_user_id,
+            "base_info": {"channel_version": CHANNEL_VERSION},
+        }
+        if context_token:
+            body["context_token"] = context_token
+        r = await self._client.post(
+            f"{self.base_url}/ilink/bot/getconfig",
+            json=body,
+            headers=self._headers(),
+            timeout=CONFIG_TIMEOUT,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def send_typing(
+        self, ilink_user_id: str, typing_ticket: str, status: int = 1
+    ) -> None:
+        # status: 1 = typing, 2 = cancel
+        r = await self._client.post(
+            f"{self.base_url}/ilink/bot/sendtyping",
+            json={
+                "ilink_user_id": ilink_user_id,
+                "typing_ticket": typing_ticket,
+                "status": status,
+                "base_info": {"channel_version": CHANNEL_VERSION},
+            },
+            headers=self._headers(),
+            timeout=CONFIG_TIMEOUT,
+        )
+        r.raise_for_status()
+
+    async def get_typing_ticket(
+        self, ilink_user_id: str, context_token: str | None = None
+    ) -> str | None:
+        cached = self._typing_tickets.get(ilink_user_id)
+        now = time.monotonic()
+        if cached and (now - cached[1]) < TYPING_TICKET_TTL:
+            return cached[0]
+        resp = await self.get_config(ilink_user_id, context_token)
+        if resp.get("ret") not in (0, None):
+            return None
+        ticket = resp.get("typing_ticket")
+        if not ticket:
+            return None
+        self._typing_tickets[ilink_user_id] = (ticket, now)
+        return ticket
 
     async def send_text(self, to_user_id: str, context_token: str, text: str) -> dict:
         # Match x1ah/wechat-ilink-demo buildSendTextBody exactly.

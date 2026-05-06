@@ -52,3 +52,10 @@ class SessionStore:
     def set_cwd(self, chat_id: str, cwd: str) -> None:
         self._touch(chat_id)["cwd"] = cwd
         self._save()
+
+    def set_ctx_token(self, chat_id: str, ctx_token: str) -> None:
+        self._touch(chat_id)["ctx_token"] = ctx_token
+        self._save()
+
+    def get_ctx_token(self, chat_id: str) -> str | None:
+        return self._data.get(chat_id, {}).get("ctx_token")

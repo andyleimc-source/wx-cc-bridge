@@ -1,0 +1,23 @@
+[Unit]
+Description=wx-cc-bridge (WeChat ClawBot ↔ Claude Code CLI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+WorkingDirectory=__INSTALL_DIR__
+# Claude Code → DeepSeek backend + disable flags
+EnvironmentFile=/etc/claude-code/env
+# Project-private secrets (WX_BRIDGE_PUSH_TOKEN, etc.)
+EnvironmentFile=-/etc/ailei/secrets.env
+Environment="PATH=__USER_HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=__USER_HOME__/.local/bin/uv run wx-bridge
+Restart=on-failure
+RestartSec=5s
+StandardOutput=append:__USER_HOME__/.wx-cc-bridge/bridge.log
+StandardError=append:__USER_HOME__/.wx-cc-bridge/bridge.log
+
+[Install]
+WantedBy=multi-user.target
