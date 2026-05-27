@@ -46,6 +46,15 @@ class ILinkClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    async def reset(self) -> None:
+        # Rebuild httpx pool — recovers from stuck PoolTimeout after network drop.
+        old = self._client
+        self._client = httpx.AsyncClient(timeout=LONGPOLL_TIMEOUT)
+        try:
+            await old.aclose()
+        except Exception:
+            pass
+
     def _headers(self) -> dict[str, str]:
         h = {
             "Content-Type": "application/json",

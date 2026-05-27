@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import json
 import os
+import sys
 from pathlib import Path
 
 from . import claude_runner, commands, push_server
@@ -17,6 +18,8 @@ from .session_store import SessionStore
 
 TYPING_HEARTBEAT_SEC = 3.0
 SOFT_NOTICE_SEC = 90.0  # 超过此时长仍未返回，停 typing 并发一条"还在思考"提示
+POLL_FAILS_RESET = 5    # 连续失败 N 次 → 重建 httpx 池
+POLL_FAILS_EXIT = 15    # 连续失败 N 次 → 退出进程，让 launchd 拉
 
 STATE_DIR = Path(os.environ.get("WX_CC_STATE", Path.home() / ".wx-cc-bridge"))
 TOKEN_PATH = STATE_DIR / "token.json"
@@ -189,11 +192,20 @@ async def main() -> None:
     else:
         print("[push] WX_BRIDGE_PUSH_TOKEN not set, push endpoint disabled")
 
+    poll_fails = 0
     while True:
         try:
             data = await client.getupdates(cursor)
+            poll_fails = 0
         except Exception as e:
-            print(f"[poll] error: {e!r}; retry in 2s")
+            poll_fails += 1
+            print(f"[poll] error: {e!r} (fails={poll_fails}); retry in 2s")
+            if poll_fails >= POLL_FAILS_EXIT:
+                print(f"[poll] {poll_fails} consecutive failures, exiting for launchd restart")
+                sys.exit(1)
+            if poll_fails == POLL_FAILS_RESET:
+                print(f"[poll] {poll_fails} consecutive failures, resetting httpx pool")
+                await client.reset()
             await asyncio.sleep(2)
             continue
 
